@@ -21,6 +21,7 @@ import {
 export default function TeacherDashboard() {
   const { user, logout } = useAuth();
   const [rooms, setRooms] = useState<EdukardRoom[]>([]);
+  const [controlClasses, setControlClasses] = useState<Array<{ id: string; name: string; subject: string }>>([]);
   const [collections, setCollections] = useState<EdukardCollection[]>([]);
   const [collectionCardCounts, setCollectionCardCounts] = useState<Record<string, number>>({});
   const [selectedRoomId, setSelectedRoomId] = useState<string | null>(null);
@@ -48,10 +49,15 @@ export default function TeacherDashboard() {
     if (!user?.id) return;
     setLoading(true);
     try {
-      const [roomsRes, colsRes, cardsRes] = await Promise.all([
+      const [roomsRes, colsRes, cardsRes, clsRes] = await Promise.all([
         supabase.from('edukard_rooms').select('*').eq('teacher_id', user.id).order('created_at', { ascending: false }),
         supabase.from('edukard_collections').select('*').eq('teacher_id', user.id).order('created_at', { ascending: false }),
         supabase.from('edukard_cards').select('id, collection_id').eq('teacher_id', user.id).eq('kind', 'study'),
+        supabase
+          .from('app_data')
+          .select('id, payload')
+          .eq('user_id', user.id)
+          .eq('collection_name', 'classes'),
       ]);
 
       const rList = (roomsRes.data || []) as EdukardRoom[];
@@ -60,6 +66,15 @@ export default function TeacherDashboard() {
         setSelectedRoomId(rList[0].id);
       }
       setCollections((colsRes.data || []) as EdukardCollection[]);
+      setControlClasses(
+        (clsRes.data || [])
+          .filter((c: any) => !c.payload?.is_archived)
+          .map((c: any) => ({
+            id: String(c.id),
+            name: c.payload?.name || 'Clase',
+            subject: c.payload?.subject || '',
+          }))
+      );
 
       const counts: Record<string, number> = {};
       (cardsRes.data || []).forEach((c: any) => {
@@ -156,6 +171,11 @@ export default function TeacherDashboard() {
     setSelectedRoomId(created.id);
     await loadBase();
     await loadRoomDetail(created.id);
+  };
+
+  const handleUpdateRoom = async (roomId: string, patch: Partial<EdukardRoom>) => {
+    await supabase.from('edukard_rooms').update(patch).eq('id', roomId);
+    await loadBase();
   };
 
   const handleToggleCollectionInRoom = async (collectionId: string) => {
@@ -441,36 +461,98 @@ export default function TeacherDashboard() {
                 </div>
               ) : (
                 <>
-                  {/* Cabecera sala */}
-                  <div className="rounded-3xl bg-slate-900 border border-white/10 p-5 flex flex-wrap items-center justify-between gap-4">
-                    <div>
-                      <div className="flex items-center gap-2">
-                        <h2 className="text-xl font-black text-white">{selectedRoom.title}</h2>
-                        <span className="font-mono text-sm font-black px-2.5 py-0.5 rounded-xl bg-amber-500/20 text-amber-300 border border-amber-400/40">
-                          PIN: {selectedRoom.code}
-                        </span>
+                  {/* Cabecera sala + Conexión opcional con Magrana Control */}
+                  <div className="rounded-3xl bg-slate-900 border border-white/10 p-5 space-y-4">
+                    <div className="flex flex-wrap items-center justify-between gap-4">
+                      <div>
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <h2 className="text-xl font-black text-white">{selectedRoom.title}</h2>
+                          <span className="font-mono text-sm font-black px-2.5 py-0.5 rounded-xl bg-amber-500/20 text-amber-300 border border-amber-400/40">
+                            PIN: {selectedRoom.code}
+                          </span>
+                          {selectedRoom.magrana_class_id && (
+                            <span className="text-[11px] font-extrabold px-2.5 py-0.5 rounded-full bg-emerald-500/15 text-emerald-300 border border-emerald-400/30">
+                              🔗 Conectada a Magrana
+                            </span>
+                          )}
+                        </div>
+                        <p className="text-xs text-slate-400 mt-1">
+                          Sobre: {selectedRoom.pack_cost} monedas ({selectedRoom.cards_per_pack} cartas) · Común 60% · Rara 25% · Épica 11% · Legendaria 4%
+                        </p>
                       </div>
-                      <p className="text-xs text-slate-400 mt-1">
-                        Sobre: {selectedRoom.pack_cost} monedas ({selectedRoom.cards_per_pack} cartas) · Común 60% · Rara 25% · Épica 11% · Legendaria 4%
-                      </p>
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => copyRoomLink(selectedRoom.code)}
+                          className="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-white text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer"
+                        >
+                          {copiedCode === selectedRoom.code ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+                          <span>{copiedCode === selectedRoom.code ? 'Enlace copiado' : 'Copiar enlace'}</span>
+                        </button>
+                        <Link
+                          to={`/play/${selectedRoom.code}`}
+                          target="_blank"
+                          className="px-3.5 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-extrabold inline-flex items-center gap-1.5"
+                        >
+                          <span>Vista Alumno</span>
+                          <ExternalLink className="w-3.5 h-3.5" />
+                        </Link>
+                      </div>
                     </div>
-                    <div className="flex items-center gap-2">
-                      <button
-                        type="button"
-                        onClick={() => copyRoomLink(selectedRoom.code)}
-                        className="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-white text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer"
-                      >
-                        {copiedCode === selectedRoom.code ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
-                        <span>{copiedCode === selectedRoom.code ? 'Enlace copiado' : 'Copiar enlace'}</span>
-                      </button>
-                      <Link
-                        to={`/play/${selectedRoom.code}`}
-                        target="_blank"
-                        className="px-3.5 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-extrabold inline-flex items-center gap-1.5"
-                      >
-                        <span>Vista Alumno</span>
-                        <ExternalLink className="w-3.5 h-3.5" />
-                      </Link>
+
+                    {/* Conector opcional con Magrana Control + Recompensas automáticas */}
+                    <div className="pt-3 border-t border-white/10 flex flex-wrap items-center justify-between gap-3 text-xs">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="font-bold text-slate-300">🔗 Vincular con clase de Magrana Control:</span>
+                        <select
+                          value={selectedRoom.magrana_class_id || ''}
+                          onChange={(e) =>
+                            handleUpdateRoom(selectedRoom.id, {
+                              magrana_class_id: e.target.value || null,
+                            })
+                          }
+                          className="px-3 py-1.5 rounded-xl bg-slate-950 border border-white/15 text-white text-xs font-semibold"
+                        >
+                          <option value="">Modo independiente (solo PIN)</option>
+                          {controlClasses.map((cls) => (
+                            <option key={cls.id} value={cls.id}>
+                              {cls.name}{cls.subject ? ` (${cls.subject})` : ''}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+
+                      {selectedRoom.magrana_class_id && (
+                        <div className="flex flex-wrap items-center gap-2 text-[11px] text-slate-300">
+                          <span className="text-emerald-300 font-bold">Monedas auto:</span>
+                          {([
+                            ['actimagen', 'Actimagen'],
+                            ['examenes', 'Exámenes'],
+                            ['colab', 'Colab'],
+                            ['control_positive', 'Positivo'],
+                          ] as const).map(([key, label]) => (
+                            <label key={key} className="inline-flex items-center gap-1 bg-slate-950 px-2 py-1 rounded-lg border border-white/10">
+                              <span>{label}:</span>
+                              <input
+                                type="number"
+                                min={0}
+                                max={200}
+                                value={selectedRoom.reward_rules?.[key] ?? 0}
+                                onChange={(e) =>
+                                  handleUpdateRoom(selectedRoom.id, {
+                                    reward_rules: {
+                                      ...selectedRoom.reward_rules,
+                                      [key]: Math.max(0, Number(e.target.value) || 0),
+                                    },
+                                  })
+                                }
+                                className="w-11 bg-transparent text-amber-300 font-extrabold text-center focus:outline-none"
+                              />
+                              <span>🪙</span>
+                            </label>
+                          ))}
+                        </div>
+                      )}
                     </div>
                   </div>
 
