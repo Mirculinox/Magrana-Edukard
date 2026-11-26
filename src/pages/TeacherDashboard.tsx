@@ -48,6 +48,12 @@ export default function TeacherDashboard() {
   const [roomPrivilegeCards, setRoomPrivilegeCards] = useState<EdukardCard[]>([]);
   const [roomStudyCards, setRoomStudyCards] = useState<EdukardCard[]>([]);
   const [wallets, setWallets] = useState<EdukardWallet[]>([]);
+  const [roomInventory, setRoomInventory] = useState<
+    Array<{ student_key: string; card_id: string; quantity: number; ever_owned: boolean }>
+  >([]);
+  const [selectedStudentKey, setSelectedStudentKey] = useState<string | null>(null);
+  const [giveCardId, setGiveCardId] = useState<string>('');
+  const [adjustingCard, setAdjustingCard] = useState<string | null>(null);
   const [redemptions, setRedemptions] = useState<EdukardRedemption[]>([]);
 
   // Modals & forms
@@ -195,12 +201,13 @@ export default function TeacherDashboard() {
   }, [loadBase]);
 
   const loadRoomDetail = useCallback(async (roomId: string) => {
-    const [rcRes, privRes, walletsRes, redRes, collabRes] = await Promise.all([
+    const [rcRes, privRes, walletsRes, redRes, collabRes, invRes] = await Promise.all([
       supabase.from('edukard_room_collections').select('collection_id').eq('room_id', roomId),
       supabase.from('edukard_cards').select('*').eq('room_id', roomId).order('created_at', { ascending: true }),
       supabase.from('edukard_wallets').select('*').eq('room_id', roomId).order('total_coins_earned', { ascending: false }),
       supabase.from('edukard_redemptions').select('*').eq('room_id', roomId).order('created_at', { ascending: false }),
       supabase.from('edukard_room_collaborators').select('*').eq('room_id', roomId).order('created_at', { ascending: false }),
+      supabase.from('edukard_inventory').select('student_key, card_id, quantity, ever_owned').eq('room_id', roomId),
     ]);
 
     const linkedIds = new Set<string>((rcRes.data || []).map((x: any) => x.collection_id));
@@ -209,6 +216,7 @@ export default function TeacherDashboard() {
     setWallets((walletsRes.data || []) as EdukardWallet[]);
     setRedemptions((redRes.data || []) as EdukardRedemption[]);
     setCollaborators(collabRes.data || []);
+    setRoomInventory((invRes.data || []) as any[]);
 
     if (linkedIds.size > 0) {
       const { data: sCards } = await supabase
@@ -324,6 +332,27 @@ export default function TeacherDashboard() {
       p_note: 'Recompensa manual del docente',
     });
     await loadRoomDetail(selectedRoomId);
+  };
+
+  const handleAdjustStudentCard = async (studentKey: string, cardId: string, delta: number) => {
+    if (!selectedRoomId || !cardId) return;
+    const busyKey = `${studentKey}_${cardId}`;
+    setAdjustingCard(busyKey);
+    try {
+      const { data, error } = await supabase.rpc('edukard_teacher_adjust_card', {
+        p_room_id: selectedRoomId,
+        p_student_key: studentKey,
+        p_card_id: cardId,
+        p_delta: delta,
+      });
+      if (error || (data && data.ok === false)) {
+        alert(data?.error || error?.message || 'No se pudo ajustar la carta. Comprueba que SQL v3 esté ejecutado.');
+      } else {
+        await loadRoomDetail(selectedRoomId);
+      }
+    } finally {
+      setAdjustingCard(null);
+    }
   };
 
   const handleDeleteCollection = async (colId: string) => {
@@ -1586,51 +1615,346 @@ export default function TeacherDashboard() {
                       </div>
                     )}
 
-                    {/* SUBTAB 4: Alumnos y Monedas */}
-                    {roomSubTab === 'students' && (
-                      <div className="magrana-card rounded-2xl p-5 space-y-3">
-                        {wallets.length === 0 ? (
-                          <div className="text-center py-8 text-xs text-slate-500 dark:text-slate-400">
-                            <Users className="w-8 h-8 text-slate-400 dark:text-slate-600 mx-auto mb-2" />
-                            Vincula el código <strong className="text-amber-700 dark:text-amber-300">{selectedRoom.code}</strong> en tu clase de Magrana Control para que tus alumnos entren desde su ficha.
+                    {/* SUBTAB 4: Alumnos, Monedas y Control de Cartas */}
+                    {roomSubTab === 'students' && (() => {
+                      const allRoomCards = [...roomPrivilegeCards, ...roomStudyCards];
+                      const cardsById = new Map<string, EdukardCard>();
+                      allRoomCards.forEach((c) => cardsById.set(c.id, c));
+
+                      const invByStudent = new Map<
+                        string,
+                        Array<{ card_id: string; quantity: number; ever_owned: boolean }>
+                      >();
+                      let totalCopiesInRoom = 0;
+                      roomInventory.forEach((row) => {
+                        totalCopiesInRoom += Math.max(0, Number(row.quantity) || 0);
+                        const list = invByStudent.get(row.student_key) || [];
+                        list.push(row);
+                        invByStudent.set(row.student_key, list);
+                      });
+
+                      const totalCatalogCount = allRoomCards.length;
+                      const avgDistinct =
+                        wallets.length > 0
+                          ? Math.round(
+                              wallets.reduce((acc, w) => {
+                                const list = invByStudent.get(w.student_key) || [];
+                                return acc + list.filter((x) => x.ever_owned || x.quantity > 0).length;
+                              }, 0) / wallets.length
+                            )
+                          : 0;
+
+                      const selectedWallet = selectedStudentKey
+                        ? wallets.find((w) => w.student_key === selectedStudentKey) || null
+                        : null;
+                      const selectedInv = selectedWallet
+                        ? (invByStudent.get(selectedWallet.student_key) || []).filter((x) => x.quantity > 0)
+                        : [];
+
+                      return (
+                        <div className="magrana-card rounded-2xl p-5 space-y-4">
+                          <div className="flex items-center justify-between gap-2">
+                            <div>
+                              <h3 className="text-sm font-black text-slate-900 dark:text-white">
+                                Control general e individual de cartas y monedas
+                              </h3>
+                              <p className="text-xs text-slate-500 dark:text-slate-400">
+                                Consulta el progreso global de la clase o entra en la ficha de cualquier alumno para darle o quitarle cartas.
+                              </p>
+                            </div>
+                            <HelpGuideButton
+                              title="Control de Cartas del Alumnado"
+                              subtitle="Supervisa y ajusta el álbum de cada estudiante."
+                              items={[
+                                {
+                                  label: 'Vista general',
+                                  description: 'Muestra el total de cartas en circulación, el álbum desbloqueado por cada alumno y sus monedas actuales.',
+                                },
+                                {
+                                  label: 'Vista individual',
+                                  description: 'Pulsa «🃏 Cartas» en cualquier alumno para ver exactamente qué privilegios y cartas de temario tiene, quitarle copias (−) o regalarle nuevas (+).',
+                                },
+                              ]}
+                            />
                           </div>
-                        ) : (
-                          wallets.map((w) => (
-                            <div
-                              key={w.id}
-                              className="p-3.5 rounded-xl magrana-well flex flex-wrap items-center justify-between gap-3"
-                            >
-                              <div>
-                                <div className="text-sm font-black text-slate-900 dark:text-white">
-                                  {w.student_name}
-                                </div>
-                                <div className="text-xs text-slate-500 dark:text-slate-400">
-                                  Saldo: <strong className="text-amber-700 dark:text-amber-300">{w.coins} 🪙</strong> · Sobres abiertos: {w.packs_opened}
-                                </div>
+
+                          {/* Resumen general de la clase */}
+                          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                            <div className="p-3.5 rounded-xl magrana-well">
+                              <div className="text-[11px] font-bold text-slate-500 dark:text-slate-400">
+                                Alumnos activos
                               </div>
-                              <div className="flex items-center gap-1.5">
-                                <button
-                                  type="button"
-                                  onClick={() => handleGiveBonusCoins(w, 15)}
-                                  className="px-3 py-1.5 rounded-xl bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/35 text-amber-800 dark:text-amber-300 text-xs font-extrabold inline-flex items-center gap-1 cursor-pointer"
-                                >
-                                  <Coins className="w-3.5 h-3.5" />
-                                  <span>+15</span>
-                                </button>
-                                <button
-                                  type="button"
-                                  onClick={() => handleGiveBonusCoins(w, 30)}
-                                  className="px-3 py-1.5 rounded-xl bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/35 text-emerald-800 dark:text-emerald-300 text-xs font-extrabold inline-flex items-center gap-1 cursor-pointer"
-                                >
-                                  <Layers className="w-3.5 h-3.5" />
-                                  <span>+1 Sobre (30)</span>
-                                </button>
+                              <div className="text-xl font-black text-slate-900 dark:text-white mt-0.5">
+                                {wallets.length}
                               </div>
                             </div>
-                          ))
-                        )}
-                      </div>
-                    )}
+                            <div className="p-3.5 rounded-xl magrana-well">
+                              <div className="text-[11px] font-bold text-slate-500 dark:text-slate-400">
+                                Cartas en posesión (total clase)
+                              </div>
+                              <div className="text-xl font-black text-amber-700 dark:text-amber-400 mt-0.5">
+                                {totalCopiesInRoom} 🃏
+                              </div>
+                            </div>
+                            <div className="p-3.5 rounded-xl magrana-well">
+                              <div className="text-[11px] font-bold text-slate-500 dark:text-slate-400">
+                                Progreso medio del álbum
+                              </div>
+                              <div className="text-xl font-black text-emerald-700 dark:text-emerald-400 mt-0.5">
+                                {avgDistinct} / {totalCatalogCount}
+                              </div>
+                            </div>
+                          </div>
+
+                          {wallets.length === 0 ? (
+                            <div className="text-center py-8 text-xs text-slate-500 dark:text-slate-400">
+                              <Users className="w-8 h-8 text-slate-400 dark:text-slate-600 mx-auto mb-2" />
+                              Vincula el código{' '}
+                              <strong className="text-amber-700 dark:text-amber-300">{selectedRoom.code}</strong> en tu clase de Magrana Control para que tus alumnos entren desde su ficha.
+                            </div>
+                          ) : (
+                            <div className="space-y-2.5">
+                              {wallets.map((w) => {
+                                const stInv = invByStudent.get(w.student_key) || [];
+                                const totalCopies = stInv.reduce((acc, x) => acc + Math.max(0, x.quantity || 0), 0);
+                                const distinctOwned = stInv.filter((x) => x.ever_owned || x.quantity > 0).length;
+                                const privilegeCopies = stInv.reduce((acc, x) => {
+                                  const card = cardsById.get(x.card_id);
+                                  return acc + (card?.kind === 'privilege' ? Math.max(0, x.quantity || 0) : 0);
+                                }, 0);
+
+                                return (
+                                  <div
+                                    key={w.id}
+                                    className="p-3.5 rounded-xl magrana-well flex flex-wrap items-center justify-between gap-3"
+                                  >
+                                    <div className="min-w-0">
+                                      <div className="text-sm font-black text-slate-900 dark:text-white">
+                                        {w.student_name}
+                                      </div>
+                                      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+                                        <span>
+                                          Saldo:{' '}
+                                          <strong className="text-amber-700 dark:text-amber-300">
+                                            {w.coins} 🪙
+                                          </strong>
+                                        </span>
+                                        <span>Sobres: {w.packs_opened}</span>
+                                        <span>
+                                          Cartas:{' '}
+                                          <strong className="text-slate-900 dark:text-white">
+                                            {totalCopies}
+                                          </strong>{' '}
+                                          ({privilegeCopies} ⭐)
+                                        </span>
+                                        <span>
+                                          Álbum:{' '}
+                                          <strong className="text-emerald-700 dark:text-emerald-400">
+                                            {distinctOwned}/{totalCatalogCount}
+                                          </strong>
+                                        </span>
+                                      </div>
+                                    </div>
+                                    <div className="flex flex-wrap items-center gap-1.5">
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          setSelectedStudentKey(w.student_key);
+                                          setGiveCardId(allRoomCards[0]?.id || '');
+                                        }}
+                                        className="px-3 py-1.5 rounded-xl bg-fuchsia-500/15 hover:bg-fuchsia-500/25 border border-fuchsia-500/35 text-fuchsia-700 dark:text-fuchsia-300 text-xs font-extrabold inline-flex items-center gap-1 cursor-pointer"
+                                      >
+                                        <span>🃏 Ver / Editar cartas</span>
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => handleGiveBonusCoins(w, 15)}
+                                        className="px-2.5 py-1.5 rounded-xl bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/35 text-amber-800 dark:text-amber-300 text-xs font-extrabold inline-flex items-center gap-1 cursor-pointer"
+                                      >
+                                        <Coins className="w-3.5 h-3.5" />
+                                        <span>+15</span>
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => handleGiveBonusCoins(w, 30)}
+                                        className="px-2.5 py-1.5 rounded-xl bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/35 text-emerald-800 dark:text-emerald-300 text-xs font-extrabold inline-flex items-center gap-1 cursor-pointer"
+                                      >
+                                        <Layers className="w-3.5 h-3.5" />
+                                        <span>+1 Sobre</span>
+                                      </button>
+                                    </div>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          )}
+
+                          {/* Modal individual: Ver, dar y quitar cartas a un alumno */}
+                          {selectedWallet && (
+                            <div
+                              onClick={() => setSelectedStudentKey(null)}
+                              className="fixed inset-0 z-50 bg-slate-950/70 backdrop-blur-sm flex items-center justify-center p-4"
+                            >
+                              <div
+                                onClick={(e) => e.stopPropagation()}
+                                className="w-full max-w-2xl max-h-[88vh] overflow-y-auto rounded-2xl magrana-modal p-6 space-y-5"
+                              >
+                                <div className="flex items-start justify-between gap-3 border-b border-slate-200 dark:border-slate-700 pb-4">
+                                  <div>
+                                    <span className="text-[11px] font-extrabold uppercase tracking-wider text-amber-700 dark:text-amber-400">
+                                      Ficha Individual de Cartas
+                                    </span>
+                                    <h3 className="text-lg font-black text-slate-900 dark:text-white mt-0.5">
+                                      {selectedWallet.student_name}
+                                    </h3>
+                                    <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+                                      Saldo: <strong className="text-amber-700 dark:text-amber-300">{selectedWallet.coins} 🪙</strong> · Sobres abiertos: {selectedWallet.packs_opened}
+                                    </p>
+                                  </div>
+                                  <button
+                                    type="button"
+                                    onClick={() => setSelectedStudentKey(null)}
+                                    className="p-2 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-400 hover:text-slate-900 dark:hover:text-white cursor-pointer"
+                                  >
+                                    <X className="w-5 h-5" />
+                                  </button>
+                                </div>
+
+                                {/* Dar una carta manualmente */}
+                                <div className="p-4 rounded-xl magrana-well space-y-2.5">
+                                  <label className="text-xs font-extrabold text-slate-900 dark:text-white block">
+                                    🎁 Dar una carta manualmente a este alumno
+                                  </label>
+                                  <div className="flex flex-wrap gap-2">
+                                    <select
+                                      value={giveCardId}
+                                      onChange={(e) => setGiveCardId(e.target.value)}
+                                      className="flex-1 min-w-[200px] px-3 py-2 rounded-xl magrana-input text-xs font-semibold"
+                                    >
+                                      <option value="">Selecciona una carta...</option>
+                                      {roomPrivilegeCards.length > 0 && (
+                                        <optgroup label="⭐ Cartas de Privilegio">
+                                          {roomPrivilegeCards.map((c) => (
+                                            <option key={c.id} value={c.id}>
+                                              {c.icon} {c.title} ({RARITY_META[c.rarity].label})
+                                            </option>
+                                          ))}
+                                        </optgroup>
+                                      )}
+                                      {roomStudyCards.length > 0 && (
+                                        <optgroup label="📚 Cartas de Temario">
+                                          {roomStudyCards.map((c) => (
+                                            <option key={c.id} value={c.id}>
+                                              {c.icon} {c.title} ({RARITY_META[c.rarity].label})
+                                            </option>
+                                          ))}
+                                        </optgroup>
+                                      )}
+                                    </select>
+                                    <button
+                                      type="button"
+                                      disabled={!giveCardId || adjustingCard !== null}
+                                      onClick={() =>
+                                        handleAdjustStudentCard(selectedWallet.student_key, giveCardId, 1)
+                                      }
+                                      className="px-4 py-2 rounded-xl bg-amber-600 hover:bg-amber-700 disabled:opacity-40 text-white text-xs font-extrabold cursor-pointer"
+                                    >
+                                      + Dar 1 copia
+                                    </button>
+                                  </div>
+                                </div>
+
+                                {/* Inventario actual del alumno */}
+                                <div className="space-y-3">
+                                  <h4 className="text-xs font-extrabold uppercase tracking-wider text-slate-500 dark:text-slate-400">
+                                    Cartas que tiene actualmente ({selectedInv.reduce((a, b) => a + b.quantity, 0)} copias)
+                                  </h4>
+
+                                  {selectedInv.length === 0 ? (
+                                    <p className="text-xs text-slate-500 dark:text-slate-400 text-center py-6 magrana-well rounded-xl">
+                                      Este alumno todavía no tiene ninguna carta en su inventario.
+                                    </p>
+                                  ) : (
+                                    <div className="space-y-2">
+                                      {selectedInv.map((item) => {
+                                        const card = cardsById.get(item.card_id);
+                                        if (!card) return null;
+                                        const isBusy =
+                                          adjustingCard === `${selectedWallet.student_key}_${item.card_id}`;
+                                        return (
+                                          <div
+                                            key={item.card_id}
+                                            className="p-3 rounded-xl magrana-well flex items-center justify-between gap-3"
+                                          >
+                                            <div className="flex items-center gap-2.5 min-w-0">
+                                              <span className="text-xl shrink-0">{card.icon}</span>
+                                              <div className="min-w-0">
+                                                <div className="flex items-center gap-1.5 flex-wrap">
+                                                  <span className="text-xs font-black text-slate-900 dark:text-white truncate">
+                                                    {card.title}
+                                                  </span>
+                                                  <span
+                                                    className={`text-[9px] font-extrabold px-1.5 py-0.5 rounded ${RARITY_META[card.rarity].badge}`}
+                                                  >
+                                                    {RARITY_META[card.rarity].label}
+                                                  </span>
+                                                  <span className="text-[10px] font-bold text-slate-500 dark:text-slate-400">
+                                                    {card.kind === 'privilege' ? '⭐ Privilegio' : '📚 Temario'}
+                                                  </span>
+                                                </div>
+                                                <p className="text-[11px] text-slate-500 dark:text-slate-400 truncate">
+                                                  {card.summary}
+                                                </p>
+                                              </div>
+                                            </div>
+
+                                            <div className="flex items-center gap-1.5 shrink-0">
+                                              <button
+                                                type="button"
+                                                disabled={isBusy}
+                                                onClick={() =>
+                                                  handleAdjustStudentCard(
+                                                    selectedWallet.student_key,
+                                                    item.card_id,
+                                                    -1
+                                                  )
+                                                }
+                                                title="Quitar 1 copia"
+                                                className="w-7 h-7 rounded-lg bg-rose-500/15 hover:bg-rose-500/25 text-rose-700 dark:text-rose-300 font-black text-sm flex items-center justify-center cursor-pointer disabled:opacity-40"
+                                              >
+                                                −
+                                              </button>
+                                              <span className="w-8 text-center font-mono text-xs font-black text-slate-900 dark:text-white">
+                                                x{item.quantity}
+                                              </span>
+                                              <button
+                                                type="button"
+                                                disabled={isBusy}
+                                                onClick={() =>
+                                                  handleAdjustStudentCard(
+                                                    selectedWallet.student_key,
+                                                    item.card_id,
+                                                    1
+                                                  )
+                                                }
+                                                title="Dar 1 copia más"
+                                                className="w-7 h-7 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-700 dark:text-emerald-300 font-black text-sm flex items-center justify-center cursor-pointer disabled:opacity-40"
+                                              >
+                                                +
+                                              </button>
+                                            </div>
+                                          </div>
+                                        );
+                                      })}
+                                    </div>
+                                  )}
+                                </div>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })()}
 
                     {/* SUBTAB 5: Compartir / Co-editar con otros docentes */}
                     {roomSubTab === 'share' && (

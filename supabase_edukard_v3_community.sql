@@ -96,3 +96,81 @@ BEGIN
   RETURN jsonb_build_object('ok', true, 'collection_id', v_new_col_id, 'cards_copied', v_copied);
 END;
 $$;
+
+-- ============================================================================
+-- Control docente del inventario de cartas (dar o quitar cartas a un alumno)
+-- ============================================================================
+DROP POLICY IF EXISTS "edukard_inventory_teacher_write" ON public.edukard_inventory;
+CREATE POLICY "edukard_inventory_teacher_write" ON public.edukard_inventory
+  FOR ALL USING (
+    EXISTS (
+      SELECT 1 FROM public.edukard_rooms r
+      WHERE r.id = edukard_inventory.room_id
+        AND (
+          r.teacher_id = auth.uid()
+          OR EXISTS (
+            SELECT 1 FROM public.edukard_room_collaborators c
+            WHERE c.room_id = r.id
+              AND c.collaborator_id = auth.uid()
+              AND c.status = 'accepted'
+          )
+        )
+    )
+  );
+
+CREATE OR REPLACE FUNCTION public.edukard_teacher_adjust_card(
+  p_room_id UUID,
+  p_student_key TEXT,
+  p_card_id UUID,
+  p_delta INTEGER
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_uid UUID := auth.uid();
+  v_allowed BOOLEAN := false;
+  v_new_qty INTEGER := 0;
+BEGIN
+  IF v_uid IS NULL THEN
+    RETURN jsonb_build_object('ok', false, 'error', 'Debes iniciar sesión.');
+  END IF;
+
+  SELECT EXISTS (
+    SELECT 1 FROM public.edukard_rooms r
+    WHERE r.id = p_room_id AND r.teacher_id = v_uid
+  ) OR EXISTS (
+    SELECT 1 FROM public.edukard_room_collaborators c
+    WHERE c.room_id = p_room_id
+      AND c.collaborator_id = v_uid
+      AND c.status = 'accepted'
+  ) INTO v_allowed;
+
+  IF NOT v_allowed THEN
+    RETURN jsonb_build_object('ok', false, 'error', 'No tienes permiso para editar esta gamificación.');
+  END IF;
+
+  IF p_delta > 0 THEN
+    INSERT INTO public.edukard_inventory (room_id, student_key, card_id, quantity, ever_owned, updated_at)
+    VALUES (p_room_id, p_student_key, p_card_id, p_delta, true, NOW())
+    ON CONFLICT (room_id, student_key, card_id)
+    DO UPDATE SET
+      quantity = public.edukard_inventory.quantity + p_delta,
+      ever_owned = true,
+      updated_at = NOW()
+    RETURNING quantity INTO v_new_qty;
+  ELSIF p_delta < 0 THEN
+    UPDATE public.edukard_inventory
+    SET quantity = GREATEST(0, quantity + p_delta),
+        updated_at = NOW()
+    WHERE room_id = p_room_id
+      AND student_key = p_student_key
+      AND card_id = p_card_id
+    RETURNING quantity INTO v_new_qty;
+  END IF;
+
+  RETURN jsonb_build_object('ok', true, 'quantity', COALESCE(v_new_qty, 0));
+END;
+$$;
