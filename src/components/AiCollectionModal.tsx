@@ -17,13 +17,16 @@ interface AiCardDraft {
 
 interface AiCollectionModalProps {
   teacherId: string;
+  authorName?: string;
   onClose: () => void;
   onCreated: () => void;
 }
 
-export default function AiCollectionModal({ teacherId, onClose, onCreated }: AiCollectionModalProps) {
+export default function AiCollectionModal({ teacherId, authorName, onClose, onCreated }: AiCollectionModalProps) {
   const [title, setTitle] = useState('');
   const [subject, setSubject] = useState('');
+  const [tagsInput, setTagsInput] = useState('');
+  const [isPublic, setIsPublic] = useState(true);
   const [cardCount, setCardCount] = useState(16);
   const [syllabusText, setSyllabusText] = useState('');
   const [copied, setCopied] = useState(false);
@@ -124,16 +127,45 @@ REGLAS ESTRICTAS:
     setIsSaving(true);
     setParseError(null);
     try {
-      const { data: col, error: colErr } = await supabase
+      const parsedTags = Array.from(
+        new Set(
+          tagsInput
+            .split(/[\s,;]+/)
+            .map((t) => t.trim().replace(/^#+/, '').toLowerCase())
+            .filter(Boolean)
+        )
+      );
+
+      let { data: col, error: colErr } = await supabase
         .from('edukard_collections')
         .insert({
           teacher_id: teacherId,
           title: title.trim(),
           subject: subject.trim(),
           description: `${parsedCards.length} cartas de temario generadas con IA`,
+          is_public: isPublic,
+          tags: parsedTags,
+          author_name: authorName || 'Docente',
         })
         .select()
         .single();
+
+      // Fallback si SQL v3 aún no se ha ejecutado (sin columnas tags/author_name)
+      if (colErr && /column|tags|author_name/i.test(colErr.message || '')) {
+        const retry = await supabase
+          .from('edukard_collections')
+          .insert({
+            teacher_id: teacherId,
+            title: title.trim(),
+            subject: subject.trim(),
+            description: `${parsedCards.length} cartas de temario generadas con IA`,
+            is_public: isPublic,
+          })
+          .select()
+          .single();
+        col = retry.data;
+        colErr = retry.error;
+      }
 
       if (colErr || !col) throw colErr || new Error('No se pudo crear la colección');
 
@@ -248,18 +280,49 @@ REGLAS ESTRICTAS:
             </div>
           </div>
 
-          <div>
-            <label className="text-xs font-bold text-slate-700 dark:text-slate-300 block mb-1">
-              Asignatura / Curso
-            </label>
-            <input
-              type="text"
-              value={subject}
-              onChange={(e) => setSubject(e.target.value)}
-              placeholder="Ej: Biología 4º ESO / Laboratorio Clínico FP"
-              className="w-full px-3.5 py-2.5 rounded-xl magrana-input text-sm focus:outline-none focus:border-amber-500"
-            />
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div>
+              <label className="text-xs font-bold text-slate-700 dark:text-slate-300 block mb-1">
+                Asignatura / Curso
+              </label>
+              <input
+                type="text"
+                value={subject}
+                onChange={(e) => setSubject(e.target.value)}
+                placeholder="Ej: Biología 4º ESO / Laboratorio Clínico FP"
+                className="w-full px-3.5 py-2.5 rounded-xl magrana-input text-sm focus:outline-none focus:border-amber-500"
+              />
+            </div>
+            <div>
+              <label className="text-xs font-bold text-slate-700 dark:text-slate-300 block mb-1">
+                Hashtags (separados por espacio o coma)
+              </label>
+              <input
+                type="text"
+                value={tagsInput}
+                onChange={(e) => setTagsInput(e.target.value)}
+                placeholder="Ej: #biologia #4eso #celula"
+                className="w-full px-3.5 py-2.5 rounded-xl magrana-input text-sm focus:outline-none focus:border-amber-500"
+              />
+            </div>
           </div>
+
+          <label className="flex items-center justify-between gap-3 p-3 rounded-xl magrana-well cursor-pointer">
+            <div>
+              <div className="text-xs font-extrabold text-slate-900 dark:text-white">
+                🌍 Colección pública en la Comunidad Magrana
+              </div>
+              <div className="text-[11px] text-slate-500 dark:text-slate-400">
+                Otros docentes podrán encontrarla por hashtag y clonarla. Puedes desactivarlo cuando quieras.
+              </div>
+            </div>
+            <input
+              type="checkbox"
+              checked={isPublic}
+              onChange={(e) => setIsPublic(e.target.checked)}
+              className="w-4 h-4 accent-amber-600 shrink-0"
+            />
+          </label>
 
           <div>
             <label className="text-xs font-bold text-slate-700 dark:text-slate-300 block mb-1">

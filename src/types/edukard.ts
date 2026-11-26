@@ -36,6 +36,9 @@ export interface EdukardCollection {
   subject: string;
   description: string;
   is_public: boolean;
+  tags?: string[];
+  author_name?: string;
+  downloads_count?: number;
   created_at: string;
 }
 

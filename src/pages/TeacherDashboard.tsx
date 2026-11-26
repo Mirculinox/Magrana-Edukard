@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom';
 import {
   Sparkles, Plus, Copy, Check, Trash2, Coins, ShieldCheck,
   BookOpen, Layers, Users, ExternalLink, LogOut, Settings, UserPlus,
-  Menu, X, Moon, Sun
+  Menu, X, Moon, Sun, Globe, Lock, Hash, Download, Search
 } from 'lucide-react';
 import { supabase } from '../utils/supabase';
 import { useAuth } from '../context/AuthContext';
@@ -33,8 +33,14 @@ export default function TeacherDashboard() {
   const [controlClasses, setControlClasses] = useState<Array<{ id: string; name: string; subject: string }>>([]);
   const [collections, setCollections] = useState<EdukardCollection[]>([]);
   const [collectionCardCounts, setCollectionCardCounts] = useState<Record<string, number>>({});
+  const [communityCollections, setCommunityCollections] = useState<EdukardCollection[]>([]);
+  const [exploreQuery, setExploreQuery] = useState('');
+  const [cloningId, setCloningId] = useState<string | null>(null);
+  const [cloneNotice, setCloneNotice] = useState<string | null>(null);
+  const [editingTagsColId, setEditingTagsColId] = useState<string | null>(null);
+  const [editingTagsValue, setEditingTagsValue] = useState('');
   const [selectedRoomId, setSelectedRoomId] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<'rooms' | 'collections'>('rooms');
+  const [activeTab, setActiveTab] = useState<'rooms' | 'collections' | 'explore'>('rooms');
   const [roomSubTab, setRoomSubTab] = useState<'collections' | 'privileges' | 'validations' | 'students' | 'share'>('collections');
 
   // Room details
@@ -327,6 +333,76 @@ export default function TeacherDashboard() {
     if (selectedRoomId) await loadRoomDetail(selectedRoomId);
   };
 
+  const loadCommunityCollections = useCallback(async () => {
+    try {
+      const { data } = await supabase
+        .from('edukard_collections')
+        .select('*')
+        .eq('is_public', true)
+        .order('created_at', { ascending: false })
+        .limit(80);
+      setCommunityCollections((data || []) as EdukardCollection[]);
+    } catch {
+      setCommunityCollections([]);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (activeTab === 'explore') {
+      loadCommunityCollections();
+    }
+  }, [activeTab, loadCommunityCollections]);
+
+  const handleToggleCollectionPublic = async (col: EdukardCollection) => {
+    const nextPublic = !col.is_public;
+    await supabase
+      .from('edukard_collections')
+      .update({ is_public: nextPublic })
+      .eq('id', col.id);
+    setCollections((prev) =>
+      prev.map((c) => (c.id === col.id ? { ...c, is_public: nextPublic } : c))
+    );
+  };
+
+  const handleSaveCollectionTags = async (colId: string) => {
+    const parsedTags = Array.from(
+      new Set(
+        editingTagsValue
+          .split(/[\s,;]+/)
+          .map((t) => t.trim().replace(/^#+/, '').toLowerCase())
+          .filter(Boolean)
+      )
+    );
+    await supabase
+      .from('edukard_collections')
+      .update({ tags: parsedTags })
+      .eq('id', colId);
+    setCollections((prev) =>
+      prev.map((c) => (c.id === colId ? { ...c, tags: parsedTags } : c))
+    );
+    setEditingTagsColId(null);
+  };
+
+  const handleCloneCommunityCollection = async (col: EdukardCollection) => {
+    setCloningId(col.id);
+    setCloneNotice(null);
+    try {
+      const { data, error } = await supabase.rpc('edukard_clone_collection', {
+        p_source_collection_id: col.id,
+        p_author_name: user?.name || 'Docente',
+      });
+      if (error || !data?.ok) {
+        setCloneNotice(`⚠️ ${data?.error || error?.message || 'No se pudo clonar. Ejecuta SQL v3 en Supabase.'}`);
+      } else {
+        setCloneNotice(`✅ «${col.title}» clonada a tus colecciones (${data.cards_copied || 0} cartas).`);
+        await loadBase();
+        await loadCommunityCollections();
+      }
+    } finally {
+      setCloningId(null);
+    }
+  };
+
   const handleInviteCollaborator = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!selectedRoomId || !inviteCodeInput.trim()) return;
@@ -368,7 +444,12 @@ export default function TeacherDashboard() {
     setTimeout(() => setCopiedUserCode(false), 2000);
   };
 
-  const currentTabName = activeTab === 'rooms' ? 'Mis Gamificaciones' : 'Colecciones';
+  const currentTabName =
+    activeTab === 'rooms'
+      ? 'Mis Gamificaciones'
+      : activeTab === 'collections'
+      ? 'Colecciones'
+      : 'Explorar Comunidad';
 
   return (
     <div className="flex flex-col md:flex-row h-screen max-h-screen overflow-hidden bg-[#FFF1F2] dark:bg-[#0B1120] text-slate-900 dark:text-slate-100 transition-colors duration-300 relative z-0">
@@ -494,7 +575,7 @@ export default function TeacherDashboard() {
           >
             <div className="flex items-center gap-3">
               <BookOpen size={19} className={activeTab === 'collections' ? 'text-white' : 'text-slate-400'} />
-              <span className="truncate">Colecciones</span>
+              <span className="truncate">Mis Colecciones</span>
             </div>
             <span
               className={`px-2 py-0.5 rounded-full text-[11px] font-black ${
@@ -503,6 +584,22 @@ export default function TeacherDashboard() {
             >
               {collections.length}
             </span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => {
+              setActiveTab('explore');
+              setIsMobileMenuOpen(false);
+            }}
+            className={`flex items-center gap-3 px-4 py-3 rounded-2xl font-bold transition-all text-sm w-full text-left cursor-pointer ${
+              activeTab === 'explore'
+                ? 'bg-amber-600 text-white shadow-lg shadow-amber-600/25'
+                : 'text-slate-300 hover:text-white hover:bg-white/5'
+            }`}
+          >
+            <Globe size={19} className={activeTab === 'explore' ? 'text-white' : 'text-slate-400'} />
+            <span className="truncate">Explorar Comunidad</span>
           </button>
 
           <button
@@ -640,37 +737,265 @@ export default function TeacherDashboard() {
               </div>
             ) : (
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
-                {collections.map((col) => (
-                  <div
-                    key={col.id}
-                    className="magrana-card rounded-2xl p-5 flex flex-col justify-between gap-4"
-                  >
-                    <div className="space-y-1.5">
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="text-[11px] font-extrabold uppercase tracking-wider text-amber-700 dark:text-amber-400">
-                          {col.subject || 'Temario'}
-                        </span>
-                        <span className="text-xs font-bold px-2.5 py-0.5 rounded-full bg-slate-900/5 dark:bg-white/10 text-slate-800 dark:text-white">
-                          {collectionCardCounts[col.id] || 0} cartas
-                        </span>
+                {collections.map((col) => {
+                  const colTags = Array.isArray(col.tags) ? col.tags : [];
+                  const isEditingTags = editingTagsColId === col.id;
+                  return (
+                    <div
+                      key={col.id}
+                      className="magrana-card rounded-2xl p-5 flex flex-col justify-between gap-4"
+                    >
+                      <div className="space-y-2">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="text-[11px] font-extrabold uppercase tracking-wider text-amber-700 dark:text-amber-400">
+                            {col.subject || 'Temario'}
+                          </span>
+                          <span className="text-xs font-bold px-2.5 py-0.5 rounded-full bg-slate-900/5 dark:bg-white/10 text-slate-800 dark:text-white">
+                            {collectionCardCounts[col.id] || 0} cartas
+                          </span>
+                        </div>
+                        <h3 className="text-base font-black text-slate-900 dark:text-white">{col.title}</h3>
+                        <p className="text-xs text-slate-600 dark:text-slate-300">{col.description}</p>
+
+                        {/* Hashtags */}
+                        {isEditingTags ? (
+                          <div className="flex items-center gap-1.5 pt-1">
+                            <input
+                              type="text"
+                              value={editingTagsValue}
+                              onChange={(e) => setEditingTagsValue(e.target.value)}
+                              placeholder="#biologia #4eso"
+                              className="flex-1 px-2.5 py-1 rounded-lg magrana-input text-xs"
+                            />
+                            <button
+                              type="button"
+                              onClick={() => handleSaveCollectionTags(col.id)}
+                              className="px-2.5 py-1 rounded-lg bg-amber-600 text-white text-xs font-bold cursor-pointer"
+                            >
+                              Guardar
+                            </button>
+                          </div>
+                        ) : (
+                          <div className="flex flex-wrap items-center gap-1.5 pt-1">
+                            {colTags.map((t) => (
+                              <span
+                                key={t}
+                                className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-800 dark:text-amber-300"
+                              >
+                                #{t}
+                              </span>
+                            ))}
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setEditingTagsColId(col.id);
+                                setEditingTagsValue(colTags.map((t) => `#${t}`).join(' '));
+                              }}
+                              className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-slate-200/80 dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:text-amber-700 inline-flex items-center gap-0.5 cursor-pointer"
+                            >
+                              <Hash className="w-2.5 h-2.5" />
+                              <span>{colTags.length > 0 ? 'Editar' : 'Añadir #tags'}</span>
+                            </button>
+                          </div>
+                        )}
                       </div>
-                      <h3 className="text-base font-black text-slate-900 dark:text-white">{col.title}</h3>
-                      <p className="text-xs text-slate-600 dark:text-slate-300">{col.description}</p>
+
+                      <div className="flex items-center justify-between gap-2 pt-2 border-t border-slate-200 dark:border-slate-700/70">
+                        <button
+                          type="button"
+                          onClick={() => handleToggleCollectionPublic(col)}
+                          title={col.is_public ? 'Visible en Explorar Comunidad. Pulsa para hacerla privada.' : 'Privada. Pulsa para compartirla en la Comunidad.'}
+                          className={`px-2.5 py-1.5 rounded-lg text-xs font-bold inline-flex items-center gap-1 cursor-pointer transition ${
+                            col.is_public
+                              ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 hover:bg-emerald-500/25'
+                              : 'bg-slate-200/80 dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:bg-slate-300/80'
+                          }`}
+                        >
+                          {col.is_public ? <Globe className="w-3.5 h-3.5" /> : <Lock className="w-3.5 h-3.5" />}
+                          <span>{col.is_public ? 'Pública' : 'Privada'}</span>
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => handleDeleteCollection(col.id)}
+                          className="px-2.5 py-1.5 rounded-lg bg-rose-500/10 hover:bg-rose-500/20 text-rose-600 dark:text-rose-400 text-xs font-bold inline-flex items-center gap-1 cursor-pointer"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                          <span>Eliminar</span>
+                        </button>
+                      </div>
                     </div>
-                    <div className="flex justify-end pt-2 border-t border-slate-200 dark:border-slate-700/70">
-                      <button
-                        type="button"
-                        onClick={() => handleDeleteCollection(col.id)}
-                        className="px-2.5 py-1.5 rounded-lg bg-rose-500/10 hover:bg-rose-500/20 text-rose-600 dark:text-rose-400 text-xs font-bold inline-flex items-center gap-1 cursor-pointer"
-                      >
-                        <Trash2 className="w-3.5 h-3.5" />
-                        <span>Eliminar</span>
-                      </button>
-                    </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             )}
+          </section>
+        ) : activeTab === 'explore' ? (
+          /* ── TAB EXPLORAR COMUNIDAD ── */
+          <section className="max-w-6xl mx-auto space-y-6">
+            <div className="magrana-card rounded-2xl p-5 sm:p-6 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+              <div>
+                <h2 className="text-2xl font-black text-slate-900 dark:text-white tracking-tight">
+                  Explorar Comunidad Edukard
+                </h2>
+                <p className="text-xs sm:text-sm text-slate-600 dark:text-slate-300 mt-1">
+                  Descubre colecciones de temario compartidas por otros docentes, filtra por #hashtag y clónalas en 1 clic.
+                </p>
+              </div>
+              <HelpGuideButton
+                title="Comunidad Magrana Edukard"
+                subtitle="Comparte y reutiliza colecciones de temario."
+                items={[
+                  {
+                    label: 'Públicas por defecto',
+                    description: 'Las colecciones que creas se comparten automáticamente para ayudar a otros docentes, pero puedes marcarlas como Privadas en cualquier momento.',
+                  },
+                  {
+                    label: 'Clonado independiente',
+                    description: 'Al clonar una colección, obtienes tu propia copia en «Mis Colecciones» lista para activar en cualquiera de tus gamificaciones.',
+                  },
+                ]}
+              />
+            </div>
+
+            {/* Buscador + Hashtags populares */}
+            <div className="magrana-card rounded-2xl p-4 space-y-3">
+              <div className="relative">
+                <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
+                <input
+                  type="text"
+                  value={exploreQuery}
+                  onChange={(e) => setExploreQuery(e.target.value)}
+                  placeholder="Buscar por título, asignatura o #hashtag (ej. #biologia, #4eso)..."
+                  className="w-full pl-10 pr-4 py-2.5 rounded-xl magrana-input text-sm"
+                />
+              </div>
+
+              {(() => {
+                const allTags = Array.from(
+                  new Set(
+                    communityCollections.flatMap((c) => (Array.isArray(c.tags) ? c.tags : []))
+                  )
+                ).slice(0, 16);
+                if (allTags.length === 0) return null;
+                return (
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <span className="text-[11px] font-bold text-slate-500 dark:text-slate-400 mr-1">
+                      Hashtags:
+                    </span>
+                    {allTags.map((tag) => (
+                      <button
+                        key={tag}
+                        type="button"
+                        onClick={() => setExploreQuery(`#${tag}`)}
+                        className="text-[11px] font-bold px-2.5 py-1 rounded-full bg-amber-500/15 hover:bg-amber-500/25 text-amber-800 dark:text-amber-300 cursor-pointer"
+                      >
+                        #{tag}
+                      </button>
+                    ))}
+                    {exploreQuery && (
+                      <button
+                        type="button"
+                        onClick={() => setExploreQuery('')}
+                        className="text-[11px] font-bold px-2.5 py-1 rounded-full bg-slate-200 dark:bg-slate-800 text-slate-600 dark:text-slate-300 cursor-pointer"
+                      >
+                        Limpiar filtro
+                      </button>
+                    )}
+                  </div>
+                );
+              })()}
+            </div>
+
+            {cloneNotice && (
+              <div className="p-3.5 rounded-xl magrana-card text-xs font-bold text-slate-900 dark:text-white">
+                {cloneNotice}
+              </div>
+            )}
+
+            {(() => {
+              const q = exploreQuery.trim().toLowerCase().replace(/^#+/, '');
+              const filtered = communityCollections.filter((col) => {
+                if (!q) return true;
+                const tagsStr = (Array.isArray(col.tags) ? col.tags : []).join(' ').toLowerCase();
+                return (
+                  (col.title || '').toLowerCase().includes(q) ||
+                  (col.subject || '').toLowerCase().includes(q) ||
+                  (col.description || '').toLowerCase().includes(q) ||
+                  tagsStr.includes(q)
+                );
+              });
+
+              if (filtered.length === 0) {
+                return (
+                  <div className="magrana-card rounded-2xl p-12 text-center text-xs sm:text-sm text-slate-500 dark:text-slate-400">
+                    No se encontraron colecciones públicas con ese criterio.
+                  </div>
+                );
+              }
+
+              return (
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
+                  {filtered.map((col) => {
+                    const colTags = Array.isArray(col.tags) ? col.tags : [];
+                    const isMine = col.teacher_id === user?.id;
+                    return (
+                      <div
+                        key={col.id}
+                        className="magrana-card rounded-2xl p-5 flex flex-col justify-between gap-4"
+                      >
+                        <div className="space-y-2">
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="text-[11px] font-extrabold uppercase tracking-wider text-amber-700 dark:text-amber-400">
+                              {col.subject || 'Temario'}
+                            </span>
+                            <span className="text-[11px] font-semibold text-slate-500 dark:text-slate-400">
+                              Por {col.author_name || 'Docente'}
+                            </span>
+                          </div>
+                          <h3 className="text-base font-black text-slate-900 dark:text-white">{col.title}</h3>
+                          <p className="text-xs text-slate-600 dark:text-slate-300">{col.description}</p>
+                          {colTags.length > 0 && (
+                            <div className="flex flex-wrap gap-1 pt-1">
+                              {colTags.map((t) => (
+                                <button
+                                  key={t}
+                                  type="button"
+                                  onClick={() => setExploreQuery(`#${t}`)}
+                                  className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-800 dark:text-amber-300 cursor-pointer"
+                                >
+                                  #{t}
+                                </button>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                        <div className="flex items-center justify-between gap-2 pt-2 border-t border-slate-200 dark:border-slate-700/70">
+                          <span className="text-[11px] text-slate-500 dark:text-slate-400 font-semibold">
+                            {col.downloads_count || 0} clonados
+                          </span>
+                          {isMine ? (
+                            <span className="text-[11px] font-bold px-2.5 py-1 rounded-lg bg-emerald-500/15 text-emerald-700 dark:text-emerald-300">
+                              Es tuya
+                            </span>
+                          ) : (
+                            <button
+                              type="button"
+                              disabled={cloningId === col.id}
+                              onClick={() => handleCloneCommunityCollection(col)}
+                              className="px-3 py-1.5 rounded-xl bg-amber-600 hover:bg-amber-700 disabled:opacity-40 text-white text-xs font-extrabold inline-flex items-center gap-1.5 cursor-pointer"
+                            >
+                              <Download className="w-3.5 h-3.5" />
+                              <span>{cloningId === col.id ? 'Clonando...' : 'Clonar colección'}</span>
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              );
+            })()}
           </section>
         ) : (
           /* ── TAB MIS GAMIFICACIONES ── */
@@ -916,8 +1241,11 @@ export default function TeacherDashboard() {
                       {/* Reglas de monedas automáticas + enlace opcional directo */}
                       <div className="pt-3 border-t border-slate-200 dark:border-slate-700/80 flex flex-wrap items-center justify-between gap-3 text-xs">
                         <div className="flex flex-wrap items-center gap-2">
-                          <span className="font-bold text-slate-700 dark:text-slate-300">
-                            🪙 Monedas automáticas:
+                          <span
+                            title="Para Actimagen y Exámenes se entrega en proporción a la nota (ej. con 20 monedas y un 5/10, recibe 10 monedas)."
+                            className="font-bold text-slate-700 dark:text-slate-300"
+                          >
+                            🪙 Monedas auto (máx. con 10 · proporcional a la nota):
                           </span>
                           {(
                             [
@@ -1416,6 +1744,7 @@ export default function TeacherDashboard() {
       {showAiModal && user?.id && (
         <AiCollectionModal
           teacherId={user.id}
+          authorName={user.name}
           onClose={() => setShowAiModal(false)}
           onCreated={() => {
             loadBase();
