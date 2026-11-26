@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { Link } from 'react-router-dom';
 import {
   Sparkles, Plus, Copy, Check, Trash2, Coins, ShieldCheck,
-  BookOpen, Layers, Users, ExternalLink, LogOut, Settings
+  BookOpen, Layers, Users, ExternalLink, LogOut, Settings, UserPlus
 } from 'lucide-react';
 import { supabase } from '../utils/supabase';
 import { useAuth } from '../context/AuthContext';
@@ -21,12 +21,19 @@ import {
 export default function TeacherDashboard() {
   const { user, logout } = useAuth();
   const [rooms, setRooms] = useState<EdukardRoom[]>([]);
+  const [sharedRoomIds, setSharedRoomIds] = useState<Set<string>>(new Set());
+  const [myUserCode, setMyUserCode] = useState<string>('');
+  const [copiedUserCode, setCopiedUserCode] = useState(false);
+  const [collaborators, setCollaborators] = useState<any[]>([]);
+  const [inviteCodeInput, setInviteCodeInput] = useState('');
+  const [inviteStatusMsg, setInviteStatusMsg] = useState<string | null>(null);
+  const [inviting, setInviting] = useState(false);
   const [controlClasses, setControlClasses] = useState<Array<{ id: string; name: string; subject: string }>>([]);
   const [collections, setCollections] = useState<EdukardCollection[]>([]);
   const [collectionCardCounts, setCollectionCardCounts] = useState<Record<string, number>>({});
   const [selectedRoomId, setSelectedRoomId] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<'rooms' | 'collections'>('rooms');
-  const [roomSubTab, setRoomSubTab] = useState<'collections' | 'privileges' | 'validations' | 'students'>('collections');
+  const [roomSubTab, setRoomSubTab] = useState<'collections' | 'privileges' | 'validations' | 'students' | 'share'>('collections');
 
   // Room details
   const [linkedCollectionIds, setLinkedCollectionIds] = useState<Set<string>>(new Set());
@@ -49,8 +56,13 @@ export default function TeacherDashboard() {
     if (!user?.id) return;
     setLoading(true);
     try {
-      const [roomsRes, colsRes, cardsRes, clsRes] = await Promise.all([
+      const [roomsRes, collabAcceptedRes, colsRes, cardsRes, clsRes, myCodeRes] = await Promise.all([
         supabase.from('edukard_rooms').select('*').eq('teacher_id', user.id).order('created_at', { ascending: false }),
+        supabase
+          .from('edukard_room_collaborators')
+          .select('room_id')
+          .eq('collaborator_id', user.id)
+          .eq('status', 'accepted'),
         supabase.from('edukard_collections').select('*').eq('teacher_id', user.id).order('created_at', { ascending: false }),
         supabase.from('edukard_cards').select('id, collection_id').eq('teacher_id', user.id).eq('kind', 'study'),
         supabase
@@ -58,9 +70,28 @@ export default function TeacherDashboard() {
           .select('id, payload')
           .eq('user_id', user.id)
           .eq('collection_name', 'classes'),
+        supabase.rpc('edukard_ensure_teacher_code', {
+          p_display_name: user.name || 'Docente',
+          p_email: user.email || null,
+        }),
       ]);
 
-      const rList = (roomsRes.data || []) as EdukardRoom[];
+      if (myCodeRes.data?.user_code) {
+        setMyUserCode(myCodeRes.data.user_code);
+      }
+
+      const ownRooms = (roomsRes.data || []) as EdukardRoom[];
+      const sharedIds = (collabAcceptedRes.data || []).map((x: any) => x.room_id).filter(Boolean);
+      let sharedRooms: EdukardRoom[] = [];
+      if (sharedIds.length > 0) {
+        const { data: sRooms } = await supabase.from('edukard_rooms').select('*').in('id', sharedIds);
+        sharedRooms = (sRooms || []) as EdukardRoom[];
+      }
+      setSharedRoomIds(new Set(sharedIds));
+
+      const mergedMap = new Map<string, EdukardRoom>();
+      [...ownRooms, ...sharedRooms].forEach((r) => mergedMap.set(r.id, r));
+      const rList = Array.from(mergedMap.values());
       setRooms(rList);
       if (!selectedRoomId && rList.length > 0) {
         setSelectedRoomId(rList[0].id);
@@ -91,11 +122,12 @@ export default function TeacherDashboard() {
   }, [loadBase]);
 
   const loadRoomDetail = useCallback(async (roomId: string) => {
-    const [rcRes, privRes, walletsRes, redRes] = await Promise.all([
+    const [rcRes, privRes, walletsRes, redRes, collabRes] = await Promise.all([
       supabase.from('edukard_room_collections').select('collection_id').eq('room_id', roomId),
       supabase.from('edukard_cards').select('*').eq('room_id', roomId).order('created_at', { ascending: true }),
       supabase.from('edukard_wallets').select('*').eq('room_id', roomId).order('total_coins_earned', { ascending: false }),
       supabase.from('edukard_redemptions').select('*').eq('room_id', roomId).order('created_at', { ascending: false }),
+      supabase.from('edukard_room_collaborators').select('*').eq('room_id', roomId).order('created_at', { ascending: false }),
     ]);
 
     const linkedIds = new Set<string>((rcRes.data || []).map((x: any) => x.collection_id));
@@ -103,6 +135,7 @@ export default function TeacherDashboard() {
     setRoomPrivilegeCards((privRes.data || []) as EdukardCard[]);
     setWallets((walletsRes.data || []) as EdukardWallet[]);
     setRedemptions((redRes.data || []) as EdukardRedemption[]);
+    setCollaborators(collabRes.data || []);
 
     if (linkedIds.size > 0) {
       const { data: sCards } = await supabase
@@ -227,11 +260,45 @@ export default function TeacherDashboard() {
     if (selectedRoomId) await loadRoomDetail(selectedRoomId);
   };
 
+  const handleInviteCollaborator = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedRoomId || !inviteCodeInput.trim()) return;
+    setInviting(true);
+    setInviteStatusMsg(null);
+    try {
+      const { error } = await supabase.rpc('edukard_invite_collaborator', {
+        p_room_id: selectedRoomId,
+        p_target_user_code: inviteCodeInput.trim().toUpperCase(),
+        p_owner_name: user?.name || 'Docente',
+      });
+      if (error) {
+        setInviteStatusMsg(`⚠️ ${error.message}`);
+        return;
+      }
+      setInviteCodeInput('');
+      setInviteStatusMsg('✅ Invitación enviada. Le aparecerá en su Bandeja Central de Magrana para aceptar.');
+      await loadRoomDetail(selectedRoomId);
+    } finally {
+      setInviting(false);
+    }
+  };
+
+  const handleRemoveCollaborator = async (collabId: string) => {
+    await supabase.from('edukard_room_collaborators').delete().eq('id', collabId);
+    if (selectedRoomId) await loadRoomDetail(selectedRoomId);
+  };
+
   const copyRoomLink = async (code: string) => {
-    const url = `${window.location.origin}/play/${code}`;
-    await navigator.clipboard.writeText(url);
+    await navigator.clipboard.writeText(code);
     setCopiedCode(code);
     setTimeout(() => setCopiedCode(null), 2000);
+  };
+
+  const copyMyUserCode = async () => {
+    if (!myUserCode) return;
+    await navigator.clipboard.writeText(myUserCode);
+    setCopiedUserCode(true);
+    setTimeout(() => setCopiedUserCode(false), 2000);
   };
 
   return (
@@ -249,7 +316,18 @@ export default function TeacherDashboard() {
             </div>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
+            {myUserCode && (
+              <button
+                type="button"
+                onClick={copyMyUserCode}
+                title="Tu código de usuario para que otros docentes te inviten a co-editar"
+                className="px-3 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 border border-white/10 text-xs font-mono font-bold text-amber-300 inline-flex items-center gap-1.5 cursor-pointer"
+              >
+                <span>Tu código: {myUserCode}</span>
+                {copiedUserCode ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5 text-slate-400" />}
+              </button>
+            )}
             <button
               type="button"
               onClick={() => setActiveTab('rooms')}
@@ -257,7 +335,7 @@ export default function TeacherDashboard() {
                 activeTab === 'rooms' ? 'bg-indigo-600 text-white' : 'bg-slate-900 text-slate-300 hover:bg-slate-800'
               }`}
             >
-              🏫 Mis Salas ({rooms.length})
+              🎮 Gamificaciones ({rooms.length})
             </button>
             <button
               type="button"
@@ -359,14 +437,14 @@ export default function TeacherDashboard() {
             {/* Lista lateral de salas */}
             <aside className="lg:col-span-4 space-y-3">
               <div className="flex items-center justify-between">
-                <h2 className="text-sm font-extrabold uppercase tracking-wider text-slate-400">Tus Salas</h2>
+                <h2 className="text-sm font-extrabold uppercase tracking-wider text-slate-400">Tus Gamificaciones</h2>
                 <button
                   type="button"
                   onClick={() => setShowNewRoomForm((p) => !p)}
                   className="px-3 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-extrabold inline-flex items-center gap-1 cursor-pointer"
                 >
                   <Plus className="w-3.5 h-3.5" />
-                  <span>Nueva sala</span>
+                  <span>Nueva</span>
                 </button>
               </div>
 
@@ -439,7 +517,14 @@ export default function TeacherDashboard() {
                       }`}
                     >
                       <div className="flex items-center justify-between gap-2">
-                        <span className="font-extrabold text-sm text-white truncate">{r.title}</span>
+                        <span className="font-extrabold text-sm text-white truncate">
+                          {r.title}
+                          {sharedRoomIds.has(r.id) && (
+                            <span className="ml-1.5 text-[10px] font-bold px-1.5 py-0.5 rounded bg-purple-500/20 text-purple-300">
+                              Compartida
+                            </span>
+                          )}
+                        </span>
                         <span className="font-mono text-xs font-black px-2 py-0.5 rounded-lg bg-white/10 text-amber-300">
                           {r.code}
                         </span>
@@ -457,18 +542,21 @@ export default function TeacherDashboard() {
             <section className="lg:col-span-8 space-y-4">
               {!selectedRoom ? (
                 <div className="rounded-3xl bg-slate-900/50 border border-white/10 p-12 text-center text-sm text-slate-400">
-                  Selecciona o crea una sala para configurar sus colecciones, cartas de privilegio y alumnos.
+                  Selecciona o crea una gamificación para configurar sus colecciones, cartas de privilegio, alumnos y co-editores.
                 </div>
               ) : (
                 <>
-                  {/* Cabecera sala + Conexión opcional con Magrana Control */}
+                  {/* Cabecera gamificación + Conexión opcional con Magrana Control */}
                   <div className="rounded-3xl bg-slate-900 border border-white/10 p-5 space-y-4">
                     <div className="flex flex-wrap items-center justify-between gap-4">
                       <div>
                         <div className="flex items-center gap-2 flex-wrap">
                           <h2 className="text-xl font-black text-white">{selectedRoom.title}</h2>
-                          <span className="font-mono text-sm font-black px-2.5 py-0.5 rounded-xl bg-amber-500/20 text-amber-300 border border-amber-400/40">
-                            PIN: {selectedRoom.code}
+                          <span
+                            title="Pega este código en «Gamificar clase» en Magrana Control"
+                            className="font-mono text-sm font-black px-2.5 py-0.5 rounded-xl bg-amber-500/20 text-amber-300 border border-amber-400/40"
+                          >
+                            Código: {selectedRoom.code}
                           </span>
                           {selectedRoom.magrana_class_id && (
                             <span className="text-[11px] font-extrabold px-2.5 py-0.5 rounded-full bg-emerald-500/15 text-emerald-300 border border-emerald-400/30">
@@ -487,7 +575,7 @@ export default function TeacherDashboard() {
                           className="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-white text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer"
                         >
                           {copiedCode === selectedRoom.code ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
-                          <span>{copiedCode === selectedRoom.code ? 'Enlace copiado' : 'Copiar enlace'}</span>
+                          <span>{copiedCode === selectedRoom.code ? 'Código copiado' : 'Copiar código'}</span>
                         </button>
                         <Link
                           to={`/play/${selectedRoom.code}`}
@@ -556,13 +644,14 @@ export default function TeacherDashboard() {
                     </div>
                   </div>
 
-                  {/* Sub-pestañas de la sala */}
+                  {/* Sub-pestañas de la gamificación */}
                   <div className="flex flex-wrap gap-2">
                     {[
                       { id: 'collections', label: `📚 Temario en sobres (${linkedCollectionIds.size})` },
-                      { id: 'privileges', label: `⭐ Cartas de Privilegio (${roomPrivilegeCards.filter((c) => c.is_active).length})` },
+                      { id: 'privileges', label: `⭐ Privilegios (${roomPrivilegeCards.filter((c) => c.is_active).length})` },
                       { id: 'validations', label: `✅ Validaciones (${pendingValidationsCount})` },
                       { id: 'students', label: `👥 Alumnos (${wallets.length})` },
+                      { id: 'share', label: `🤝 Co-editar (${collaborators.filter((c) => c.status === 'accepted').length})` },
                     ].map((tab) => (
                       <button
                         key={tab.id}
@@ -839,6 +928,83 @@ export default function TeacherDashboard() {
                             </div>
                           </div>
                         ))
+                      )}
+                    </div>
+                  )}
+
+                  {/* SUBTAB 5: Compartir / Co-editar con otros docentes */}
+                  {roomSubTab === 'share' && (
+                    <div className="rounded-3xl bg-slate-900 border border-white/10 p-5 space-y-4">
+                      <div>
+                        <h3 className="text-sm font-extrabold text-white flex items-center gap-2">
+                          <UserPlus className="w-4 h-4 text-purple-400" />
+                          <span>Invitar a otro docente a co-editar esta gamificación</span>
+                        </h3>
+                        <p className="text-xs text-slate-400 mt-1">
+                          Pide a tu compañero su <strong>Código de Usuario</strong> (ej. <span className="font-mono text-amber-300">MGR-8K2P9Q</span>). Le aparecerá la invitación en su <strong>Bandeja Central</strong> de Magrana; si acepta, ambos editaréis exactamente las mismas cartas y reglas.
+                        </p>
+                      </div>
+
+                      <form onSubmit={handleInviteCollaborator} className="flex flex-wrap gap-2">
+                        <input
+                          type="text"
+                          value={inviteCodeInput}
+                          onChange={(e) => setInviteCodeInput(e.target.value.toUpperCase())}
+                          placeholder="MGR-XXXXXX"
+                          className="flex-1 min-w-[180px] px-3.5 py-2.5 rounded-xl bg-slate-950 border border-white/15 font-mono text-sm font-bold text-white uppercase focus:outline-none focus:border-purple-400"
+                        />
+                        <button
+                          type="submit"
+                          disabled={inviting || !inviteCodeInput.trim()}
+                          className="px-4 py-2.5 rounded-xl bg-purple-600 hover:bg-purple-500 disabled:opacity-40 text-white text-xs font-extrabold cursor-pointer"
+                        >
+                          {inviting ? 'Enviando...' : 'Enviar invitación'}
+                        </button>
+                      </form>
+
+                      {inviteStatusMsg && (
+                        <div className="p-3 rounded-xl bg-slate-950 border border-white/10 text-xs font-semibold text-slate-200">
+                          {inviteStatusMsg}
+                        </div>
+                      )}
+
+                      {collaborators.length > 0 && (
+                        <div className="space-y-2 pt-2 border-t border-white/10">
+                          <span className="text-[11px] font-extrabold uppercase tracking-wider text-slate-400">
+                            Docentes invitados
+                          </span>
+                          {collaborators.map((c) => (
+                            <div
+                              key={c.id}
+                              className="p-3 rounded-xl bg-slate-950 border border-white/10 flex items-center justify-between gap-2 text-xs"
+                            >
+                              <div>
+                                <span className="font-extrabold text-white">{c.collaborator_name}</span>
+                                <span className="ml-2 font-mono text-slate-400">{c.collaborator_code}</span>
+                              </div>
+                              <div className="flex items-center gap-2">
+                                <span
+                                  className={`px-2 py-0.5 rounded-lg font-bold ${
+                                    c.status === 'accepted'
+                                      ? 'bg-emerald-500/15 text-emerald-300'
+                                      : c.status === 'rejected'
+                                      ? 'bg-red-500/15 text-red-300'
+                                      : 'bg-amber-500/15 text-amber-300'
+                                  }`}
+                                >
+                                  {c.status === 'accepted' ? '✓ Co-editor activo' : c.status === 'rejected' ? '✕ Rechazada' : '⏳ Pendiente'}
+                                </span>
+                                <button
+                                  type="button"
+                                  onClick={() => handleRemoveCollaborator(c.id)}
+                                  className="text-red-400 hover:text-red-300 font-bold cursor-pointer"
+                                >
+                                  Quitar
+                                </button>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
                       )}
                     </div>
                   )}
