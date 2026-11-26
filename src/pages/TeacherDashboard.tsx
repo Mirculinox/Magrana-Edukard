@@ -9,9 +9,10 @@ import { supabase } from '../utils/supabase';
 import { useAuth } from '../context/AuthContext';
 import AiCollectionModal from '../components/AiCollectionModal';
 import { HelpGuideButton } from '../components/HelpGuideButton';
-import { DEFAULT_PRIVILEGE_CARDS, generateRoomCode } from '../utils/defaultPrivileges';
+import { DEFAULT_PRIVILEGE_CARDS, PRIVILEGE_TEMPLATE_CATALOG, generateRoomCode, type DefaultPrivilegeCardTemplate } from '../utils/defaultPrivileges';
 import {
   RARITY_META,
+  type CardRarity,
   type EdukardRoom,
   type EdukardCollection,
   type EdukardCard,
@@ -59,6 +60,18 @@ export default function TeacherDashboard() {
   // Modals & forms
   const [showAiModal, setShowAiModal] = useState(false);
   const [showNewRoomForm, setShowNewRoomForm] = useState(false);
+  const [showPrivilegeCatalog, setShowPrivilegeCatalog] = useState(false);
+  const [showNewPrivilegeForm, setShowNewPrivilegeForm] = useState(false);
+  const [newPrivTitle, setNewPrivTitle] = useState('');
+  const [newPrivSummary, setNewPrivSummary] = useState('');
+  const [newPrivIcon, setNewPrivIcon] = useState('⭐');
+  const [newPrivRarity, setNewPrivRarity] = useState<CardRarity>('rare');
+  const [newPrivReqCount, setNewPrivReqCount] = useState(3);
+  const [editingPrivId, setEditingPrivId] = useState<string | null>(null);
+  const [editPrivTitle, setEditPrivTitle] = useState('');
+  const [editPrivSummary, setEditPrivSummary] = useState('');
+  const [editPrivIcon, setEditPrivIcon] = useState('⭐');
+  const [editPrivRarity, setEditPrivRarity] = useState<CardRarity>('rare');
   const [newRoomTitle, setNewRoomTitle] = useState('');
   const [newRoomSubject, setNewRoomSubject] = useState('');
   const [newRoomPackCost, setNewRoomPackCost] = useState(30);
@@ -310,6 +323,67 @@ export default function TeacherDashboard() {
 
   const handleUpdatePrivilegeCard = async (cardId: string, patch: Partial<EdukardCard>) => {
     await supabase.from('edukard_cards').update(patch).eq('id', cardId);
+    if (selectedRoomId) await loadRoomDetail(selectedRoomId);
+  };
+
+  const handleAddPrivilegeFromTemplate = async (tpl: DefaultPrivilegeCardTemplate) => {
+    if (!selectedRoomId || !user?.id) return;
+    await supabase.from('edukard_cards').insert({
+      teacher_id: user.id,
+      room_id: selectedRoomId,
+      kind: 'privilege',
+      title: tpl.title,
+      summary: tpl.summary,
+      rarity: tpl.rarity,
+      icon: tpl.icon,
+      color: tpl.color,
+      requirement_type: tpl.requirement_type,
+      requirement_rarity: tpl.requirement_rarity,
+      requirement_count: tpl.requirement_count,
+      consume_requirements: tpl.consume_requirements,
+      requires_teacher_validation: tpl.requires_teacher_validation,
+      is_active: true,
+    });
+    await loadRoomDetail(selectedRoomId);
+  };
+
+  const handleCreateCustomPrivilege = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedRoomId || !user?.id || !newPrivTitle.trim()) return;
+    const colorByRarity: Record<CardRarity, string> = {
+      common: '#64748b',
+      rare: '#0284c7',
+      epic: '#9333ea',
+      legendary: '#d97706',
+    };
+    await supabase.from('edukard_cards').insert({
+      teacher_id: user.id,
+      room_id: selectedRoomId,
+      kind: 'privilege',
+      title: newPrivTitle.trim(),
+      summary: newPrivSummary.trim() || 'Efecto personalizado definido por el docente.',
+      rarity: newPrivRarity,
+      icon: newPrivIcon.trim() || '⭐',
+      color: colorByRarity[newPrivRarity],
+      requirement_type: newPrivReqCount > 0 ? 'collection_count' : 'none',
+      requirement_rarity: null,
+      requirement_count: Math.max(0, newPrivReqCount),
+      consume_requirements: true,
+      requires_teacher_validation: true,
+      is_active: true,
+    });
+    setNewPrivTitle('');
+    setNewPrivSummary('');
+    setNewPrivIcon('⭐');
+    setNewPrivRarity('rare');
+    setNewPrivReqCount(3);
+    setShowNewPrivilegeForm(false);
+    await loadRoomDetail(selectedRoomId);
+  };
+
+  const handleDeletePrivilegeCard = async (cardId: string) => {
+    if (!window.confirm('¿Eliminar esta carta de privilegio de la gamificación?')) return;
+    await supabase.from('edukard_cards').delete().eq('id', cardId);
     if (selectedRoomId) await loadRoomDetail(selectedRoomId);
   };
 
@@ -1427,120 +1501,367 @@ export default function TeacherDashboard() {
 
                     {/* SUBTAB 2: Cartas de Privilegio y requisitos */}
                     {roomSubTab === 'privileges' && (
-                      <div className="magrana-card rounded-2xl p-5 space-y-3">
-                        <div className="flex items-center justify-between gap-2">
+                      <div className="magrana-card rounded-2xl p-5 space-y-4">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
                           <p className="text-xs text-slate-600 dark:text-slate-300">
                             Al jugarse, cada carta <strong>se destruye junto con las copias exigidas</strong> para evitar abusos.
                           </p>
-                          <HelpGuideButton
-                            title="Requisitos de Privilegios"
-                            subtitle="Evita que alumnos poco participativos jueguen cartas potentes."
-                            items={[
-                              {
-                                label: 'Destrucción justa',
-                                description: 'Al jugar un privilegio, se destruye la carta y las copias sacrificadas, pero el concepto sigue desbloqueado en el álbum para repasar.',
-                              },
-                              {
-                                label: 'Sacrificar copias',
-                                description: 'Puedes exigir X cartas del temario o X copias repetidas de una carta concreta antes de poder activarla.',
-                              },
-                            ]}
-                          />
-                        </div>
-                        <div className="space-y-3">
-                          {roomPrivilegeCards.map((card) => (
-                            <div
-                              key={card.id}
-                              className={`p-4 rounded-xl border space-y-3 ${
-                                card.is_active ? 'magrana-well' : 'magrana-well opacity-60'
-                              }`}
+                          <div className="flex flex-wrap items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setShowPrivilegeCatalog((p) => !p);
+                                setShowNewPrivilegeForm(false);
+                              }}
+                              className="px-3 py-1.5 rounded-xl bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/35 text-amber-800 dark:text-amber-300 text-xs font-extrabold cursor-pointer"
                             >
-                              <div className="flex items-start justify-between gap-3">
-                                <div className="flex items-center gap-2.5">
-                                  <span className="text-2xl">{card.icon}</span>
-                                  <div>
-                                    <div className="flex items-center gap-2 flex-wrap">
-                                      <span className="text-sm font-black text-slate-900 dark:text-white">
-                                        {card.title}
-                                      </span>
-                                      <span
-                                        className={`text-[10px] font-extrabold px-2 py-0.5 rounded-full ${RARITY_META[card.rarity].badge}`}
-                                      >
-                                        {RARITY_META[card.rarity].label}
-                                      </span>
-                                    </div>
-                                    <p className="text-xs text-slate-600 dark:text-slate-400 mt-0.5">
-                                      {card.summary}
-                                    </p>
-                                  </div>
-                                </div>
-                                <label className="inline-flex items-center gap-1.5 text-xs font-bold text-slate-700 dark:text-slate-300 cursor-pointer shrink-0">
-                                  <input
-                                    type="checkbox"
-                                    checked={card.is_active}
-                                    onChange={(e) => handleUpdatePrivilegeCard(card.id, { is_active: e.target.checked })}
-                                    className="w-4 h-4 accent-amber-600"
-                                  />
-                                  <span>Activa</span>
-                                </label>
-                              </div>
+                              📚 Galería de efectos
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setShowNewPrivilegeForm((p) => !p);
+                                setShowPrivilegeCatalog(false);
+                              }}
+                              className="px-3 py-1.5 rounded-xl bg-amber-600 hover:bg-amber-700 text-white text-xs font-extrabold inline-flex items-center gap-1 cursor-pointer"
+                            >
+                              <Plus className="w-3.5 h-3.5" />
+                              <span>Nueva carta</span>
+                            </button>
+                            <HelpGuideButton
+                              title="Cartas de Privilegio"
+                              subtitle="Elige de la galería, edita los efectos o crea los tuyos."
+                              items={[
+                                {
+                                  label: 'Destrucción justa',
+                                  description: 'Al jugar un privilegio, se destruye la carta y las copias sacrificadas, pero el concepto sigue desbloqueado en el álbum para repasar.',
+                                },
+                                {
+                                  label: 'Galería y personalización',
+                                  description: 'Puedes añadir efectos predeterminados (monedas extra, bonus +0,25 en examen, prórroga...) o inventar tus propias cartas.',
+                                },
+                              ]}
+                            />
+                          </div>
+                        </div>
 
-                              <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-slate-200 dark:border-slate-700/70 text-xs">
-                                <Settings className="w-3.5 h-3.5 text-slate-400" />
-                                <span className="text-slate-600 dark:text-slate-400 font-semibold">
-                                  Requisito al jugar:
-                                </span>
-                                <select
-                                  value={card.requirement_type}
-                                  onChange={(e) =>
-                                    handleUpdatePrivilegeCard(card.id, {
-                                      requirement_type: e.target.value as RequirementType,
-                                    })
-                                  }
-                                  className="px-2.5 py-1 rounded-lg magrana-input text-xs font-medium"
-                                >
-                                  <option value="none">Ninguno (solo destruir esta)</option>
-                                  <option value="collection_count">Sacrificar X cartas de temario</option>
-                                  <option value="specific_card_copies">Sacrificar X copias de una carta concreta</option>
-                                  <option value="same_card_copies">Tener X copias de esta misma carta</option>
-                                </select>
-
-                                {card.requirement_type !== 'none' && (
-                                  <input
-                                    type="number"
-                                    min={1}
-                                    max={20}
-                                    value={card.requirement_count}
-                                    onChange={(e) =>
-                                      handleUpdatePrivilegeCard(card.id, {
-                                        requirement_count: Math.max(1, Number(e.target.value) || 1),
-                                      })
-                                    }
-                                    className="w-16 px-2 py-1 rounded-lg magrana-input text-center font-bold"
-                                  />
-                                )}
-
-                                {card.requirement_type === 'specific_card_copies' && (
-                                  <select
-                                    value={card.requirement_card_id || ''}
-                                    onChange={(e) =>
-                                      handleUpdatePrivilegeCard(card.id, {
-                                        requirement_card_id: e.target.value || null,
-                                      })
-                                    }
-                                    className="px-2.5 py-1 rounded-lg magrana-input text-xs max-w-[220px]"
-                                  >
-                                    <option value="">Selecciona carta del temario...</option>
-                                    {roomStudyCards.map((sc) => (
-                                      <option key={sc.id} value={sc.id}>
-                                        {sc.icon} {sc.title}
-                                      </option>
-                                    ))}
-                                  </select>
-                                )}
-                              </div>
+                        {/* Galería rápida de efectos predeterminados */}
+                        {showPrivilegeCatalog && (
+                          <div className="p-4 rounded-xl magrana-well space-y-3 border-2 border-amber-500/40 animate-fade-in">
+                            <div className="flex items-center justify-between gap-2">
+                              <span className="text-xs font-black uppercase tracking-wider text-amber-700 dark:text-amber-400">
+                                Galería de efectos predeterminados (añadir en 1 clic)
+                              </span>
+                              <button
+                                type="button"
+                                onClick={() => setShowPrivilegeCatalog(false)}
+                                className="p-1 rounded-lg text-slate-400 hover:text-slate-800 dark:hover:text-white cursor-pointer"
+                              >
+                                <X size={15} />
+                              </button>
                             </div>
-                          ))}
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 max-h-72 overflow-y-auto pr-1">
+                              {PRIVILEGE_TEMPLATE_CATALOG.map((tpl, idx) => {
+                                const alreadyAdded = roomPrivilegeCards.some(
+                                  (c) => c.title.toLowerCase() === tpl.title.toLowerCase()
+                                );
+                                return (
+                                  <div
+                                    key={idx}
+                                    className="p-3 rounded-xl bg-white dark:bg-[#1F2D42] border border-slate-200 dark:border-slate-700 flex items-start justify-between gap-2"
+                                  >
+                                    <div className="flex items-start gap-2 min-w-0">
+                                      <span className="text-xl shrink-0">{tpl.icon}</span>
+                                      <div className="min-w-0">
+                                        <div className="flex items-center gap-1.5 flex-wrap">
+                                          <span className="text-xs font-black text-slate-900 dark:text-white">
+                                            {tpl.title}
+                                          </span>
+                                          <span
+                                            className={`text-[9px] font-extrabold px-1.5 py-0.5 rounded ${RARITY_META[tpl.rarity].badge}`}
+                                          >
+                                            {RARITY_META[tpl.rarity].label}
+                                          </span>
+                                        </div>
+                                        <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
+                                          {tpl.summary}
+                                        </p>
+                                      </div>
+                                    </div>
+                                    <button
+                                      type="button"
+                                      disabled={alreadyAdded}
+                                      onClick={() => handleAddPrivilegeFromTemplate(tpl)}
+                                      className="px-2.5 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-700 disabled:bg-slate-200 dark:disabled:bg-slate-800 disabled:text-slate-500 text-white text-[11px] font-extrabold shrink-0 cursor-pointer"
+                                    >
+                                      {alreadyAdded ? 'Añadida' : '+ Añadir'}
+                                    </button>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Formulario para crear una carta de privilegio personalizada */}
+                        {showNewPrivilegeForm && (
+                          <form
+                            onSubmit={handleCreateCustomPrivilege}
+                            className="p-4 rounded-xl magrana-well space-y-3 border-2 border-amber-500/40 animate-fade-in"
+                          >
+                            <div className="flex items-center justify-between gap-2">
+                              <span className="text-xs font-black uppercase tracking-wider text-amber-700 dark:text-amber-400">
+                                Crear carta de privilegio personalizada
+                              </span>
+                              <button
+                                type="button"
+                                onClick={() => setShowNewPrivilegeForm(false)}
+                                className="p-1 rounded-lg text-slate-400 hover:text-slate-800 dark:hover:text-white cursor-pointer"
+                              >
+                                <X size={15} />
+                              </button>
+                            </div>
+                            <div className="grid grid-cols-1 sm:grid-cols-12 gap-2.5">
+                              <input
+                                type="text"
+                                maxLength={4}
+                                value={newPrivIcon}
+                                onChange={(e) => setNewPrivIcon(e.target.value)}
+                                placeholder="⭐"
+                                className="sm:col-span-2 px-3 py-2 rounded-xl magrana-input text-center text-base"
+                                title="Emoji de la carta"
+                              />
+                              <input
+                                type="text"
+                                required
+                                value={newPrivTitle}
+                                onChange={(e) => setNewPrivTitle(e.target.value)}
+                                placeholder="Título (ej. Bonus de Examen +0,25)"
+                                className="sm:col-span-6 px-3 py-2 rounded-xl magrana-input text-xs font-semibold"
+                              />
+                              <select
+                                value={newPrivRarity}
+                                onChange={(e) => setNewPrivRarity(e.target.value as CardRarity)}
+                                className="sm:col-span-4 px-3 py-2 rounded-xl magrana-input text-xs font-semibold"
+                              >
+                                <option value="common">Común</option>
+                                <option value="rare">Rara</option>
+                                <option value="epic">Épica</option>
+                                <option value="legendary">Legendaria</option>
+                              </select>
+                            </div>
+                            <input
+                              type="text"
+                              required
+                              value={newPrivSummary}
+                              onChange={(e) => setNewPrivSummary(e.target.value)}
+                              placeholder="Descripción del efecto (ej. Suma +0,25 en el próximo examen o recibe 25 monedas extra)"
+                              className="w-full px-3 py-2 rounded-xl magrana-input text-xs"
+                            />
+                            <div className="flex flex-wrap items-center justify-between gap-2">
+                              <label className="inline-flex items-center gap-2 text-xs font-semibold text-slate-600 dark:text-slate-300">
+                                <span>Cartas de temario a sacrificar:</span>
+                                <input
+                                  type="number"
+                                  min={0}
+                                  max={20}
+                                  value={newPrivReqCount}
+                                  onChange={(e) => setNewPrivReqCount(Math.max(0, Number(e.target.value) || 0))}
+                                  className="w-16 px-2 py-1 rounded-lg magrana-input text-center font-bold"
+                                />
+                              </label>
+                              <button
+                                type="submit"
+                                className="px-4 py-2 rounded-xl bg-amber-600 hover:bg-amber-700 text-white text-xs font-extrabold cursor-pointer"
+                              >
+                                Guardar carta
+                              </button>
+                            </div>
+                          </form>
+                        )}
+
+                        <div className="space-y-3">
+                          {roomPrivilegeCards.map((card) => {
+                            const isEditing = editingPrivId === card.id;
+                            return (
+                              <div
+                                key={card.id}
+                                className={`p-4 rounded-xl border space-y-3 ${
+                                  card.is_active ? 'magrana-well' : 'magrana-well opacity-60'
+                                }`}
+                              >
+                                {isEditing ? (
+                                  <div className="space-y-2.5">
+                                    <div className="grid grid-cols-1 sm:grid-cols-12 gap-2">
+                                      <input
+                                        type="text"
+                                        maxLength={4}
+                                        value={editPrivIcon}
+                                        onChange={(e) => setEditPrivIcon(e.target.value)}
+                                        className="sm:col-span-2 px-2.5 py-1.5 rounded-lg magrana-input text-center text-base"
+                                      />
+                                      <input
+                                        type="text"
+                                        value={editPrivTitle}
+                                        onChange={(e) => setEditPrivTitle(e.target.value)}
+                                        className="sm:col-span-6 px-3 py-1.5 rounded-lg magrana-input text-xs font-bold"
+                                      />
+                                      <select
+                                        value={editPrivRarity}
+                                        onChange={(e) => setEditPrivRarity(e.target.value as CardRarity)}
+                                        className="sm:col-span-4 px-2.5 py-1.5 rounded-lg magrana-input text-xs font-semibold"
+                                      >
+                                        <option value="common">Común</option>
+                                        <option value="rare">Rara</option>
+                                        <option value="epic">Épica</option>
+                                        <option value="legendary">Legendaria</option>
+                                      </select>
+                                    </div>
+                                    <input
+                                      type="text"
+                                      value={editPrivSummary}
+                                      onChange={(e) => setEditPrivSummary(e.target.value)}
+                                      className="w-full px-3 py-1.5 rounded-lg magrana-input text-xs"
+                                    />
+                                    <div className="flex justify-end gap-2">
+                                      <button
+                                        type="button"
+                                        onClick={() => setEditingPrivId(null)}
+                                        className="px-3 py-1 rounded-lg border border-slate-300 dark:border-slate-600 text-xs font-bold cursor-pointer"
+                                      >
+                                        Cancelar
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={async () => {
+                                          await handleUpdatePrivilegeCard(card.id, {
+                                            title: editPrivTitle.trim() || card.title,
+                                            summary: editPrivSummary.trim() || card.summary,
+                                            icon: editPrivIcon.trim() || card.icon,
+                                            rarity: editPrivRarity,
+                                          });
+                                          setEditingPrivId(null);
+                                        }}
+                                        className="px-3 py-1 rounded-lg bg-amber-600 text-white text-xs font-extrabold cursor-pointer"
+                                      >
+                                        Guardar cambios
+                                      </button>
+                                    </div>
+                                  </div>
+                                ) : (
+                                  <div className="flex items-start justify-between gap-3">
+                                    <div className="flex items-center gap-2.5">
+                                      <span className="text-2xl">{card.icon}</span>
+                                      <div>
+                                        <div className="flex items-center gap-2 flex-wrap">
+                                          <span className="text-sm font-black text-slate-900 dark:text-white">
+                                            {card.title}
+                                          </span>
+                                          <span
+                                            className={`text-[10px] font-extrabold px-2 py-0.5 rounded-full ${RARITY_META[card.rarity].badge}`}
+                                          >
+                                            {RARITY_META[card.rarity].label}
+                                          </span>
+                                        </div>
+                                        <p className="text-xs text-slate-600 dark:text-slate-400 mt-0.5">
+                                          {card.summary}
+                                        </p>
+                                      </div>
+                                    </div>
+                                    <div className="flex items-center gap-2 shrink-0">
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          setEditingPrivId(card.id);
+                                          setEditPrivTitle(card.title);
+                                          setEditPrivSummary(card.summary);
+                                          setEditPrivIcon(card.icon);
+                                          setEditPrivRarity(card.rarity);
+                                        }}
+                                        className="px-2 py-1 rounded-lg bg-slate-200/70 dark:bg-slate-800 hover:bg-amber-500/20 text-slate-700 dark:text-slate-200 text-[11px] font-bold cursor-pointer"
+                                      >
+                                        Editar
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => handleDeletePrivilegeCard(card.id)}
+                                        className="p-1.5 rounded-lg bg-rose-500/10 hover:bg-rose-500/20 text-rose-600 dark:text-rose-400 cursor-pointer"
+                                        title="Eliminar carta"
+                                      >
+                                        <Trash2 className="w-3.5 h-3.5" />
+                                      </button>
+                                      <label className="inline-flex items-center gap-1.5 text-xs font-bold text-slate-700 dark:text-slate-300 cursor-pointer">
+                                        <input
+                                          type="checkbox"
+                                          checked={card.is_active}
+                                          onChange={(e) =>
+                                            handleUpdatePrivilegeCard(card.id, { is_active: e.target.checked })
+                                          }
+                                          className="w-4 h-4 accent-amber-600"
+                                        />
+                                        <span>Activa</span>
+                                      </label>
+                                    </div>
+                                  </div>
+                                )}
+
+                                <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-slate-200 dark:border-slate-700/70 text-xs">
+                                  <Settings className="w-3.5 h-3.5 text-slate-400" />
+                                  <span className="text-slate-600 dark:text-slate-400 font-semibold">
+                                    Requisito al jugar:
+                                  </span>
+                                  <select
+                                    value={card.requirement_type}
+                                    onChange={(e) =>
+                                      handleUpdatePrivilegeCard(card.id, {
+                                        requirement_type: e.target.value as RequirementType,
+                                      })
+                                    }
+                                    className="px-2.5 py-1 rounded-lg magrana-input text-xs font-medium"
+                                  >
+                                    <option value="none">Ninguno (solo destruir esta)</option>
+                                    <option value="collection_count">Sacrificar X cartas de temario</option>
+                                    <option value="specific_card_copies">Sacrificar X copias de una carta concreta</option>
+                                    <option value="same_card_copies">Tener X copias de esta misma carta</option>
+                                  </select>
+
+                                  {card.requirement_type !== 'none' && (
+                                    <input
+                                      type="number"
+                                      min={1}
+                                      max={20}
+                                      value={card.requirement_count}
+                                      onChange={(e) =>
+                                        handleUpdatePrivilegeCard(card.id, {
+                                          requirement_count: Math.max(1, Number(e.target.value) || 1),
+                                        })
+                                      }
+                                      className="w-16 px-2 py-1 rounded-lg magrana-input text-center font-bold"
+                                    />
+                                  )}
+
+                                  {card.requirement_type === 'specific_card_copies' && (
+                                    <select
+                                      value={card.requirement_card_id || ''}
+                                      onChange={(e) =>
+                                        handleUpdatePrivilegeCard(card.id, {
+                                          requirement_card_id: e.target.value || null,
+                                        })
+                                      }
+                                      className="px-2.5 py-1 rounded-lg magrana-input text-xs max-w-[220px]"
+                                    >
+                                      <option value="">Selecciona carta del temario...</option>
+                                      {roomStudyCards.map((sc) => (
+                                        <option key={sc.id} value={sc.id}>
+                                          {sc.icon} {sc.title}
+                                        </option>
+                                      ))}
+                                    </select>
+                                  )}
+                                </div>
+                              </div>
+                            );
+                          })}
                         </div>
                       </div>
                     )}
